@@ -15,6 +15,7 @@ import consola from "consola";
 import { Floodfill } from "../../utils/FloodFill";
 import { Tile } from "../../world/Tile";
 import { DialogBuilder } from "../../utils/builders/DialogBuilder";
+import { getCurrentTimeInSeconds } from "../../utils/Utils";
 
 export class TileChangeReq {
   private pos: number;
@@ -49,29 +50,6 @@ export class TileChangeReq {
     else {
       this.onPlace();
     }
-  }
-
-  private checkOwner() {
-    if (this.world.data.owner) {
-      if (this.world.data.owner.id !== this.peer.data?.id_user) return false;
-      if (this.peer.data?.role !== ROLE.DEVELOPER) return false;
-
-      if (
-        this.itemMeta.id === 242 &&
-        this.world.data.owner.id !== this.peer.data?.id_user
-      ) {
-        this.peer.send(
-          Variant.from(
-            "OnTalkBubble",
-            this.peer.data.netID,
-            `\`#[\`0\`9World Locked by ${this.world.data.owner?.displayName}\`#]`
-          )
-        );
-        return false;
-      }
-
-      return true;
-    } else return true;
   }
 
   private async onTileWrench() {
@@ -209,7 +187,7 @@ export class TileChangeReq {
     const mainLock = this.block.lock
       ? this.world.data.blocks[
         (this.block.lock.ownerX as number) +
-            (this.block.lock.ownerY as number) * this.world.data.width
+      (this.block.lock.ownerY as number) * this.world.data.width
       ]
       : null;
 
@@ -249,9 +227,56 @@ export class TileChangeReq {
 
     if (this.block.fg === 2946) this.displayBlockPlace();
 
-    const placed = await this.onPlaced(placedItem);
+    if ((this.itemMeta?.id ?? 0) - 1 !== placedItem.id - 1) {
 
-    if (placed) this.peer.removeItemInven(this.tank.data?.info as number, 1);
+      if (this.block.tree && placedItem.type == ActionTypes.SEED) {
+        if (Date.now() >= this.block.tree.fullyGrownAt) {
+          this.notifySplicingMatureTree();
+          return;
+        }
+
+        if (this.block.tree.isSpliced) {
+          this.notifySplicing3Seeds();
+          return;
+        }
+
+
+        const searchIds = [placedItem.id - 1, (this.itemMeta?.id ?? 0) - 1];
+
+        const foundItem = this.base.items.wiki.find(item => {
+
+          const spliceArray = item.recipe?.splice;
+          const bothIdsFound = spliceArray && searchIds.every(id => spliceArray.includes(id));
+
+          //if (bothIdsFound) {
+          //  console.log(`Item ${item.name} has both IDs: ${searchIds}`);
+          //}
+          return bothIdsFound;
+
+        }) || null;
+
+        const foundItemId = foundItem ? foundItem.id + 1 : 0;
+
+        // if (foundItemId !== 0) {
+        //   this.peer.removeItemInven(this.tank.data?.info as number, 1);
+        // }
+
+        const placedItemFound = this.base.items.metadata.items.find(
+          (i) => i.id === foundItemId
+        );
+
+        if (placedItemFound && placedItemFound.id !== 0) {
+          await this.onPlaced(placedItemFound, { splicerSeedId: placedItem.id });
+          //if (placed) {
+          //this.peer.removeItemInven(this.tank.data?.info as number, 1); // this code is unreachable, when placed is true it goes to onPlaced
+          //}
+        } else {
+          this.notifyFailedSplice(this.block.fg, placedItem.id);
+        }
+      } else {
+        await this.onPlaced(placedItem);
+      }
+    }
     this.peer.inventory();
     this.peer.saveToCache();
     return;
@@ -274,30 +299,45 @@ export class TileChangeReq {
     );
   }
 
-  private async onPlaced(placedItem: ItemDefinition) {
+  private async onPlaced(
+    placedItem: ItemDefinition,
+    // splicer seed id is the seed that initiates the splicing, or in other words, the second seed
+    { splicerSeedId: splicerSeedId }: { splicerSeedId?: number } = { splicerSeedId: undefined }
+  ) {
     const flags = placedItem.flags as number;
     const actionType = placedItem.type as number;
+
     const isBg =
       this.base.items.metadata.items[this.tank.data?.info as number].type ===
-        ActionTypes.BACKGROUND ||
+      ActionTypes.BACKGROUND ||
       this.base.items.metadata.items[this.tank.data?.info as number].type ===
-        ActionTypes.SHEET_MUSIC;
+      ActionTypes.SHEET_MUSIC;
 
     if (this.block.fg === 2946 && actionType !== ActionTypes.DISPLAY_BLOCK)
       return false;
 
     if (this.block.fg && flags & BlockFlags.WRENCHABLE) return false;
-    if (this.block.fg && !this.block.bg) return false;
+    if (this.block.fg && !isBg) {
+      // if this is not a splicing action, then prevent blocks from overriding other blocks
+      if (!splicerSeedId) {
+        return false;
+      }
+    }
     if (this.block.fg && actionType === ActionTypes.PLATFORM) return false;
 
-    const placeBlock = (fruit?: number) =>
+    if (this.tank.data?.info as number !== 32 || this.tank.data?.info as number !== 18 || this.tank.data?.info as number !== 0) {
+      this.peer.removeItemInven(this.tank.data?.info as number, 1);
+    }
+
+
+    const placeBlock = (fruit?: number, dontSendTileChange?: boolean) =>
       this.world.place(
         this.peer,
         this.block.x,
         this.block.y,
         placedItem.id as number,
         isBg,
-        fruit
+        { fruitCount: fruit, dontSendTileChange: dontSendTileChange },
       );
     switch (actionType) {
       case ActionTypes.SHEET_MUSIC:
@@ -305,6 +345,10 @@ export class TileChangeReq {
       case ActionTypes.LAVA:
       case ActionTypes.PLATFORM:
       case ActionTypes.FOREGROUND:
+      case ActionTypes.BOOMBOX:
+      case ActionTypes.FOREGROUND_WITH_EXTRA_FRAME:
+      case ActionTypes.PHASED_BLOCK:
+      case ActionTypes.PHASED_BLOCK_2:
       case ActionTypes.BACKGROUND: {
         placeBlock();
         Tile.tileUpdate(
@@ -435,7 +479,7 @@ export class TileChangeReq {
             this.block.x,
             this.block.y,
             placedItem.id as number,
-            isBg
+            isBg,
           );
 
           const algo = new Floodfill({
@@ -544,7 +588,7 @@ export class TileChangeReq {
       }
 
       case ActionTypes.SEED: {
-        if (this.block.fg !== 0) return false;
+        if (this.block.fg !== 0 && !splicerSeedId) return false;
 
         const id = placedItem?.id as number;
         const item = this.base.items.metadata.items[id];
@@ -552,20 +596,44 @@ export class TileChangeReq {
           Math.floor(Math.random() * 10 * (1 - (item.rarity || 0) / 1000)) + 1;
         const now = Date.now();
 
+        // this.peer.send(Variant.from("OnConsoleMessage", `\`2Placed Item Id ${this.itemMeta.id}`));
+
+        this.block.damage = 0;
+        this.block.resetStateAt = 0;
         this.block.tree = {
           fruit:        id - 1,
           fruitCount,
-          fullyGrownAt: now + (item.growTime || 0) * 1000,
-          plantedAt:    now
+          fullyGrownAt: (this.block.tree?.plantedAt ?? now) + (item.growTime || 0) * 1000,
+          plantedAt:    now,
+          isSpliced:    !!splicerSeedId,
         };
 
-        placeBlock(fruitCount > 4 ? 4 : fruitCount);
+        placeBlock(fruitCount > 4 ? 4 : fruitCount, !!splicerSeedId);
         Tile.tileUpdate(
           this.base,
           this.peer,
           this.world,
           this.block,
           placedItem.type as number
+        );
+
+        if (splicerSeedId) {
+          this.notifySuccessfulSplice(this.block.fg, splicerSeedId, placedItem.id!);
+        }
+        break;
+      }
+
+      case ActionTypes.SIGN: {
+        this.block.sign = {
+          label: ""
+        }
+        placeBlock();
+        Tile.tileUpdate(
+          this.base,
+          this.peer,
+          this.world,
+          this.block,
+          placedItem.type!
         );
         break;
       }
@@ -579,13 +647,29 @@ export class TileChangeReq {
 
   private async onFist() {
     if (!this.itemMeta.id) return;
-    if (!this.checkOwner()) return this.sendLockSound();
+    if (this.world.data.owner) {
+      if (this.world.data.owner.id !== this.peer.data.id_user) {
+        if (this.itemMeta.type === ActionTypes.LOCK) {
+          this.peer.send(
+            Variant.from(
+              "OnTalkBubble",
+              this.peer.data.netID,
+              `\`#[\`0\`9World Locked by ${this.world.data.owner?.displayName}\`#]`
+            )
+          );
+          this.sendLockSound();
+          return;
+        }
+        if (this.peer.data.role !== ROLE.DEVELOPER) return this.sendLockSound();
+      }
+    }
+
+
     if (
       typeof this.block.damage !== "number" ||
       (this.block.resetStateAt as number) <= Date.now()
     )
       this.block.damage = 0;
-
     if (
       this.unbreakableBlocks.includes(this.itemMeta.id) &&
       this.peer.data?.role !== ROLE.DEVELOPER
@@ -607,18 +691,57 @@ export class TileChangeReq {
       this.onFistDamaged();
     }
 
-    this.peer.send(this.tank);
     this.world.saveToCache();
-    this.peer.every((p) => {
-      if (
-        p.data?.netID !== this.peer.data?.netID &&
-        p.data?.world === this.peer.data?.world &&
-        p.data?.world !== "EXIT"
-      ) {
-        p.send(this.tank);
-      }
-    });
+    if (this.tank.data) {
+      this.peer.send(this.tank);
+      this.peer.every((p) => {
+        if (
+          p.data?.netID !== this.peer.data?.netID &&
+          p.data?.world === this.peer.data?.world &&
+          p.data?.world !== "EXIT"
+        ) {
+          p.send(this.tank);
+        }
+      });
+    }
   }
+
+  // If you will want to drop gems on the floor use the following code (fix is required)
+  //public splitGems(num: number) {
+  //  const gemValues = {
+  //    yellow: 1,
+  //    blue:   5,
+  //    red:    10,
+  //    green:  50,
+  //    purple: 100
+  //  };
+
+  //  const values = [];
+
+  //  for (const [gemName, gemValue] of Object.entries(gemValues).sort((a, b) => b[1] - a[1])) {
+  //    const maxGems = Math.floor(num / gemValue);
+  //    values.push(...Array(maxGems).fill(gemValue));
+  //    num -= maxGems * gemValue;
+  //    if (num === 0) {
+  //      break;
+  //    }
+  //  }
+
+  //  return values;
+  //}
+
+  //public dropRandomGems(min: number, max: number, block: Block) {
+  //  const randGems = Math.floor(Math.random() * (max - min + 1)) + min;
+  //  const arrGems = this.splitGems(randGems);
+
+  //  arrGems.forEach((v) => {
+  //    const extra = Math.random() * 6;
+
+  //    const x = (block.x as number) * 32 + extra;
+  //    const y = (block.y as number) * 32 + extra - Math.floor(Math.random() * (3 - -1) + -3);
+  //    this.world.drop(this.peer, x, y, 112, v, { tree: true, noSimilar: true });
+  //  });
+  //}
 
   private onFistDestroyed() {
     const placedItem = this.base.items.metadata.items.find(
@@ -636,6 +759,36 @@ export class TileChangeReq {
     (this.tank.data as Tank).info = 18;
 
     this.block.rotatedLeft = undefined;
+
+
+    if ((this.itemMeta.rarity || 0) < 999) {
+      this.peer.addXp(Math.max(1, Math.round((this.itemMeta.rarity ?? 0) / 5)) * 5 / 5, false);
+    }
+
+    let dropItemId = null;
+
+    // This is also different from harvesting tree, as this means that tree is broken when it is not fully grow yet.
+    if (this.itemMeta.type == ActionTypes.SEED) {
+      if (Math.random() <= 0.10) {
+        dropItemId = this.itemMeta.id!;
+      }
+    }
+    else {
+      dropItemId = this.randomizeDrop(this.itemMeta.id!)
+    }
+
+    if (!((this.itemMeta.flags as number) & BlockFlags.SEEDLESS) && dropItemId != null) {
+      this.world.drop(
+        this.peer,
+        this.block.x * 32 + Math.floor(Math.random() * 16),
+        this.block.y * 32 + Math.floor(Math.random() * 16),
+        dropItemId,
+        1,
+        { tree: true }
+      );
+    }
+
+    this.calculateGemDrop();
 
     switch (this.itemMeta.type) {
       case ActionTypes.PORTAL:
@@ -707,6 +860,127 @@ export class TileChangeReq {
         }
         break;
       }
+
+      case ActionTypes.SEED: {
+        this.block.tree = undefined
+        break;
+      }
+    }
+  }
+
+  // private onFistDestroyedTree() {
+  //   const placedItem = this.base.items.metadata.items.find(
+  //     (i) => i.id === this.tank.data?.info
+  //   );
+  //   if (!placedItem || !placedItem.id) return;
+
+  //   this.block.damage = 0;
+  //   this.block.resetStateAt = 0;
+
+  //   if (this.block.fg) this.block.fg = 0;
+  //   else if (this.block.bg) this.block.bg = 0;
+
+  //   this.calculateGemDrop()
+
+  //   this.block.rotatedLeft = undefined;
+
+  //   this.block.tree = undefined;
+  //   this.block.fg = 0x0;
+
+  //   this.peer.every(
+  //     (p) =>
+  //       p.data?.world === this.peer.data?.world &&
+  //       p.data?.world !== "EXIT" &&
+  //       p.send(
+  //         TankPacket.from({
+  //           type: TankTypes.SEND_TILE_TREE_STATE,
+  //           netID: this.peer.data?.netID,
+  //           targetNetID: -1,
+  //           xPunch: this.block.x,
+  //           yPunch: this.block.y
+  //         })
+  //       )
+  //   );
+  // }
+
+  private calculateGemDrop() {
+    const rarity = this.itemMeta.rarity as number;
+
+    // Prevent no rarity items drop gems
+    if (rarity >= 999) {
+      return;
+    }
+
+    // used Kukuri's code for gems drop https://discord.com/channels/617041217951236291/1109350502975676536/1322578761102917663
+    const amount = this.randomizeGemsDrop(rarity);
+    if (amount === 0) return;
+
+    if (isNaN(amount) || amount < 0) {
+      return this.peer.send(Variant.from("OnConsoleMessage", "`4Invalid amount. Please specify a positive number.`"));
+    }
+
+    const targetPlayer = this.peer.data;
+
+    if (targetPlayer) {
+
+      targetPlayer.gems += amount;
+      this.peer.send(Variant.from("OnConsoleMessage", `\`2Collected ${amount} gems`));
+
+      if (targetPlayer !== this.peer.data) {
+        const targetPeer = new Peer(this.base, targetPlayer?.netID);
+        console.log("Successfully added gems");
+        targetPeer.send(Variant.from("OnConsoleMessage", `\`2${this.peer.data.tankIDName} has added ${amount} gems to your account. You now have ${targetPlayer.gems} gems.`));
+      }
+
+      this.peer.setGems(this.peer.data.gems);
+
+      this.peer.saveToCache();
+      this.peer.saveToDatabase();
+
+    }
+  }
+
+  // Trying to add more gems, because https://growtopia.fandom.com/wiki/Chandelier
+  // some items may drop more than gem calculation based on rarity
+  private randomizeGemsDrop(rarity: number) {
+    const max = Math.random();
+    let bonus = 0;
+    const threshold = Math.min(0.1 + (rarity / 100), 0.5); // Linear increase, caps on 0.5
+    // How it works: For rarity 5, threshold = 0.15, For rarity 30, threshold = 0.2
+    if (max <= threshold) {
+      bonus = 1;
+    }
+    if (rarity >= 30 && max <= 0.5) {
+      bonus = 5;
+    } else if (rarity >= 60 && max <= 0.6) {
+      bonus = 12;
+    } else if (rarity >= 60 && max <= 0.3) {
+      bonus = 5;
+    }
+
+    // Gem Calculation based on Rarity
+    let gems: number;
+    if (rarity < 30) {
+      gems = rarity / 12;
+    } else {
+      gems = rarity / 8;
+    }
+
+    return Math.floor(gems + bonus);
+  }
+
+  // Tried to find info about drop rates, here's an info on seeds: https://growtopia.fandom.com/wiki/Gems
+  // https://www.growtopiagame.com/forums/forum/general/guidebook/273543-farming-calculator%E2%80%94estimate-seeds-gems-xp-with-formula-explanations
+  // https://www.growtopiagame.com/forums/forum/general/guidebook/284860-beastly-s-calculator-hub/page12
+  private randomizeDrop(id: number) {
+    const rand = Math.random();
+    if (rand <= 0.33) {        // 2/9 chance
+      return id + 1;           // seed
+    } else if (rand <= 0.21) { // 1/9 chance
+      return id;               // block
+    } else {
+      // Need to differentiate if the function actually choose an item or returning item id that coincidentally uses the same id as blank
+      return null;
     }
   }
 
@@ -726,7 +1000,11 @@ export class TileChangeReq {
 
     switch (this.itemMeta.type) {
       case ActionTypes.SEED: {
-        this.world.harvest(this.peer, this.block);
+        if (this.block.tree && Date.now() >= this.block.tree.fullyGrownAt) {
+          // dont send tile damage 
+          this.tank.data = undefined
+          this.world.harvest(this.peer, this.block);
+        }
         break;
       }
 
@@ -796,4 +1074,79 @@ export class TileChangeReq {
         );
     });
   }
+
+  private notifySuccessfulSplice(seed1Id: number, seed2Id: number, spliceResultSeedId: number) {
+    const seed1Name = this.base.items.metadata.items.find(
+      (i) => i.id === seed1Id
+    )!.name;
+    const seed2Name = this.base.items.metadata.items.find(
+      (i) => i.id === seed2Id
+    )!.name;
+    // the block name
+    const spliceBlockName = this.base.items.metadata.items.find(
+      (i) => i.id === spliceResultSeedId - 1
+    )!.name;
+
+    this.peer.send(
+      Variant.from(
+        "OnTalkBubble",
+        this.peer.data.netID,
+        `${seed1Name} and ${seed2Name} have been spliced to make an \`o${spliceBlockName} Tree\`0!`,
+        0
+      )
+    );
+
+    this.peer.every((p) => {
+      if (p.data?.world === this.peer.data?.world && p.data?.world !== "EXIT")
+        p.send(
+          Variant.from(
+            { netID: this.peer.data?.netID },
+            "OnPlayPositioned",
+            "audio/success.wav"
+          )
+        );
+    });
+  }
+
+  private notifyFailedSplice(seed1Id: number, seed2Id: number) {
+    const seed1Name = this.base.items.metadata.items.find(
+      (i) => i.id === seed1Id
+    )!.name;
+    const seed2Name = this.base.items.metadata.items.find(
+      (i) => i.id === seed2Id
+    )!.name;
+
+    this.peer.send(
+      // stacking talk bubble didnt work :(
+      Variant.from(
+        "OnTalkBubble",
+        this.peer.data.netID,
+        `Hmm, it looks like ${seed1Name} and ${seed2Name} can't be spliced.`,
+        1
+      )
+    );
+  }
+
+  private notifySplicing3Seeds() {
+    this.peer.send(
+      Variant.from(
+        "OnTalkBubble",
+        this.peer.data.netID,
+        "it would be too dangerous to try to mix three seeds.",
+        1
+      )
+    );
+  }
+
+  private notifySplicingMatureTree() {
+    this.peer.send(
+      Variant.from(
+        "OnTalkBubble",
+        this.peer.data.netID,
+        "This tree is already too big to splice another seed with.",
+        1
+      )
+    );
+  }
+
 }

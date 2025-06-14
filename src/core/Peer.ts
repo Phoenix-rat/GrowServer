@@ -10,13 +10,16 @@ import { Base } from "./Base";
 import { World } from "./World";
 import {
   ActionTypes,
+  CharacterState,
   CLOTH_MAP,
   ClothTypes,
+  ModsEffects,
+  NameStyles,
   PacketTypes,
   ROLE,
   TankTypes
 } from "../Constants";
-import { manageArray } from "../utils/Utils";
+import { getCurrentTimeInSeconds, manageArray } from "../utils/Utils";
 
 export class Peer extends OldPeer<PeerData> {
   public base;
@@ -81,6 +84,18 @@ export class Peer extends OldPeer<PeerData> {
         return "rt";
       }
     }
+  }
+
+  public countryState() {
+    const country = (pe: Peer) => `${pe.country}|${pe.data.level >= 125 ? NameStyles.MAX_LEVEL : ""}`;
+
+    this.send(Variant.from({ netID: this.data.netID }, "OnCountryState", country(this)));
+    this.every((p) => {
+      if (p.data.netID !== this.data.netID && p.data.world === this.data.world && p.data.world !== "EXIT") {
+        p.send(Variant.from({ netID: this.data.netID }, "OnCountryState", country(this)));
+        this.send(Variant.from({ netID: p.data.netID }, "OnCountryState", country(p)));
+      }
+    });
   }
 
   public every(callbackfn: (peer: Peer, netID: number) => void): void {
@@ -218,7 +233,9 @@ export class Peer extends OldPeer<PeerData> {
 
     await world?.enter(this, xDoor, yDoor);
     this.inventory();
+    this.countryState();
     this.sound("audio/door_open.wav");
+    this.formPlayMods();
 
     this.data.lastVisitedWorlds = manageArray(
       this.data.lastVisitedWorlds!,
@@ -266,6 +283,9 @@ export class Peer extends OldPeer<PeerData> {
   }
 
   public removeItemInven(id: number, amount = 1) {
+    if (id === 0 || id === -1 || id === 32 || id === 18) {
+      return;
+    }
     const item = this.data.inventory.items.find((i) => i.id === id);
 
     if (item) {
@@ -352,6 +372,28 @@ export class Peer extends OldPeer<PeerData> {
     });
   }
 
+
+  // Check every clothes playmods & apply it
+  public formPlayMods() {
+    let charActive = 0;
+    const modActive = 0;
+
+    Object.keys(this.data.clothing).forEach((k) => {
+      const itemInfo = this.base.items.wiki.find((i) => i.id === this.data.clothing[k]);
+      const playMods = itemInfo?.playMods || [];
+
+      for (const mod of playMods) {
+        const name = mod.toLowerCase();
+        if (name.includes("double jump")) charActive |= CharacterState.DOUBLE_JUMP;
+      }
+    });
+
+    this.data.state.mod = charActive;
+    this.data.state.modsEffect = modActive;
+
+    this.sendState();
+  }
+
   public equipClothes(itemID: number) {
     if (!this.searchItem(itemID)) return;
 
@@ -375,11 +417,12 @@ export class Peer extends OldPeer<PeerData> {
         }
       }
       const itemInfo = this.base.items.wiki.find((i) => i.id === itemID);
+
       // eslint-disable-next-line no-extra-boolean-cast
       if (!!itemInfo?.func?.add) {
         this.send(Variant.from("OnConsoleMessage", itemInfo.func.add));
       }
-      // this.formState();
+      this.formPlayMods();
       this.sendClothes();
       this.send(
         TextPacket.from(
@@ -418,7 +461,7 @@ export class Peer extends OldPeer<PeerData> {
     }
 
     if (unequiped) {
-      // this.formState();
+      this.formPlayMods();
       this.sendClothes();
       this.send(
         TextPacket.from(
@@ -435,7 +478,116 @@ export class Peer extends OldPeer<PeerData> {
       this.send(Variant.from("OnConsoleMessage", itemInfo.func.rem));
     }
   }
+
   public isValid(): boolean {
     return this.data && this.data.netID !== undefined;
+  }
+
+  public sendEffect(eff: number, ...args: Variant[]) {
+    this.every((p) => {
+      if (p.data.world === this.data.world && p.data.world !== "EXIT") {
+        p.send(Variant.from("OnParticleEffect", eff, [(this.data.x as number) + 10, (this.data.y as number) + 16]), ...args);
+      }
+    });
+  }
+
+  public sendState(punchID?: number, everyPeer = true) {
+    const tank = TankPacket.from({
+      type:   TankTypes.SET_CHARACTER_STATE,
+      netID:  this.data.netID,
+      info:   this.data.state.mod,
+      xPos:   1200,
+      yPos:   200,
+      xSpeed: 300,
+      ySpeed: 600,
+      xPunch: 0,
+      yPunch: 0,
+      state:  0
+    }).parse() as Buffer;
+
+    tank.writeUint8(punchID || 0x0, 5);
+    tank.writeUint8(0x80, 6);
+    tank.writeUint8(0x80, 7);
+    tank.writeFloatLE(125.0, 20);
+
+    // if (this.data.state.modsEffect & ModsEffects.HARVESTER) {
+    //   tank.writeFloatLE(150, 36);
+    //   tank.writeFloatLE(1000, 40);
+    // }
+
+    this.send(tank);
+    if (everyPeer) {
+      this.every((p) => {
+        if (p.data.netID !== this.data.netID && p.data.world === this.data.world && p.data.world !== "EXIT") {
+          p.send(tank);
+        }
+      });
+    }
+  }
+
+
+  // Xp formulas sources: https://www.growtopiagame.com/forums/forum/general/guidebook/7120124-level-125-xp-calculator-and-data-updated-calculator
+  // https://growtopia.fandom.com/wiki/Leveling
+  // https://growtopia.fandom.com/wiki/User_blog:LightningWizardz/GROWTOPIA_FORMULA_(Rough_Calculation_Mode)
+  public addXp(amount: number, bonus: boolean) {
+    const playerLvl = this.data.level;
+    const requiredXp = this.calculateRequiredLevelXp(playerLvl);
+    
+    // Max level is 125
+    if (this.data.level >= 125) {
+      this.data.exp = 0;
+      return;
+    }
+
+    // check playmods
+    // check bonuses
+    this.data.exp += amount;
+    if (this.data.exp >= requiredXp) {
+      this.data.level++;
+      this.data.exp = 0;
+      this.sendEffect(46);
+      this.every((p) => {
+        if (p.data.world === this.data.world && p.data.world !== "EXIT") {
+          p.send(Variant.from("OnTalkBubble", this.data.netID, `${this.name} is now level ${this.data.level}!`), Variant.from("OnConsoleMessage", `${this.name} is now level ${this.data.level}!`));
+        }
+      });
+    }
+    this.countryState();
+    this.saveToCache();
+  }
+
+  public calculateRequiredLevelXp(lvl: number): number{
+    const requiredXp = 50 * ((lvl * lvl) + 2); 
+    return requiredXp;
+  }
+
+  /**
+   * Updates the current peer's gem (bux) amount and update the timestamp chat.
+   *
+   * This method sends a Variant packet to the client to update the displayed gem count,
+   * control animation, and optionally indicate supporter status (maybe). It also updates the
+   * timestamp used for console chat.
+   *
+   * @param amount - The new gem (bux) amount to set for the player.
+   * @param skip_animation - Whether to skip the gem animation (0 = show animation, 1 = skip animation). Default is 0.
+   *
+   * ### OnSetBux Packet Structure:
+   * - Param 1: `number` — The gem (bux) amount.
+   * - Param 2: `number` — Animation flag.
+   * - Param 3: `number` — Supporter status.
+   * - Param 4: `number[]` — Additional data array:
+   *   - `[0]`: `number` (float) — Current timestamp in seconds (used for console chat).
+   *   - `[1]`: `number` (float) — Reserved, typically 0.00.
+   *   - `[2]`: `number` (float) — Reserved, typically 0.00.
+   *
+   * @example
+   * // Set gems to 1000, show animation
+   * peer.setGems(1000);
+   *
+   * // Set gems to 500 and skip animation
+   * peer.setGems(500, 1);
+   */
+  public setGems(amount: number, skip_animation: number = 0) {
+    this.send(Variant.from("OnSetBux", amount, skip_animation, 0, [getCurrentTimeInSeconds(), 0.00, 0.00])); // Param 2 maybe for supporter status?
   }
 }

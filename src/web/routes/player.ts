@@ -67,7 +67,7 @@ export class PlayerRoute {
 
     this.app.post("/growid/checktoken", async (ctx) => {
       try {
-        const formData = await ctx.req.formData();
+        const formData = await ctx.req.formData() as FormData;
         const refreshToken = formData.get("refreshToken") as string;
 
         if (!refreshToken) throw new Error("Unauthorized");

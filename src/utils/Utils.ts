@@ -1,12 +1,16 @@
-import { createWriteStream, existsSync, mkdirSync } from "fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, unlinkSync } from "fs";
 import { join } from "path";
-import { request } from "undici";
 import consola from "consola";
 import { execSync } from "child_process";
 import net from "net";
+import ky from "ky";
 import decompress from "decompress";
+import { ITEMS_DAT_URL, weatherIdMap } from "../Constants";
 
 __dirname = process.cwd();
+
+
+
 const MKCERT_URL =
   "https://github.com/FiloSottile/mkcert/releases/download/v1.4.4";
 const WEBSITE_BUILD_URL =
@@ -24,19 +28,20 @@ const mkcertObj: Record<string, string> = {
 
 async function downloadFile(url: string, filePath: string) {
   try {
-    const response = await request(url, {
-      method:          "GET",
-      headers:         {},
-      maxRedirections: 5
+    const response = await ky.get(url, {
+      redirect: "follow"
     });
 
-    if (response.statusCode !== 200) {
-      throw new Error(`Failed to download file: ${response.statusCode}`);
+    if (!response.ok) {
+      throw new Error(`Failed to download file: ${response.status}`);
     }
 
     const fileStream = createWriteStream(filePath);
-
-    response.body.pipe(fileStream);
+    
+    for await (const chunk of response.body!) {
+      fileStream.write(chunk);
+    }
+    fileStream.end();
 
     await new Promise<void>((resolve, reject) => {
       fileStream.on("finish", resolve);
@@ -47,6 +52,60 @@ async function downloadFile(url: string, filePath: string) {
   } catch (error) {
     consola.error("Error downloading file:", error);
   }
+}
+
+export async function fetchJSON(url: string) {
+  try {
+    const response = await ky.get(url, {
+      redirect: "follow"
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch JSON: ${response.status}`);
+    }
+
+    const json = await response.json();
+    return json;
+  } catch (error) {
+    consola.error("Error fetching JSON:", error);
+  }
+}
+
+export async function downloadItemsDat(itemsDatName: string) {
+  const datDir = join(__dirname, ".cache", "growtopia", "dat");
+
+  
+  if (!existsSync(datDir)) {
+    mkdirSync(datDir, { recursive: true });
+  }
+  
+  const currentVersion = itemsDatName.match(/items-v(\d+\.\d+)\.dat/)?.[1];
+  
+  if (!currentVersion) {
+    consola.error("Invalid items.dat filename format");
+    return;
+  }
+
+  const existingFiles = readdirSync(datDir);
+  const versionRegex = /items-v(\d+\.\d+)\.dat/;
+  
+  for (const file of existingFiles) {
+    const match = file.match(versionRegex);
+    if (match) {
+      const existingVersion = match[1];
+      
+      if (parseFloat(currentVersion) > parseFloat(existingVersion)) {
+        unlinkSync(join(datDir, file));
+        consola.info(`Removed older version: ${file}`);
+      } else if (currentVersion === existingVersion) {
+        consola.info(`items.dat version ${currentVersion} already exists`);
+        return;
+      }
+    }
+  }
+
+  consola.info(`Downloading items.dat version ${currentVersion}`);
+  await downloadFile(`${ITEMS_DAT_URL}/${itemsDatName}`, join(__dirname, ".cache", "growtopia", "dat", itemsDatName));
 }
 
 export async function downloadMkcert() {
@@ -73,16 +132,18 @@ export async function setupMkcert() {
       ? "mkcert"
       : "mkcert.exe";
   const mkcertExecuteable = join(__dirname, ".cache", "bin", name);
+  const sslDir = join(__dirname, ".cache", "ssl");
 
-  if (!existsSync(join(__dirname, ".cache", "ssl")))
-    mkdirSync(join(__dirname, ".cache", "ssl"), { recursive: true });
+
+  if (!existsSync(sslDir))
+    mkdirSync(sslDir, { recursive: true });
   else return;
 
   consola.info("Setup mkcert certificate");
   try {
     execSync(
       `${mkcertExecuteable} -install && cd ${join(__dirname, ".cache", "ssl")} && ${mkcertExecuteable} *.growserver.app`,
-      { stdio: "ignore" }
+      { stdio: "inherit" }
     );
   } catch (e) {
     consola.error("Something wrong when setup mkcert", e);
@@ -177,3 +238,17 @@ export const checkPortInUse = (port: number): Promise<boolean> => {
       .listen(port);
   });
 };
+
+
+export function getWeatherId(blockId: number): number {
+  return weatherIdMap[blockId] || 0;
+}
+
+// Return the current time in seconds (today)
+export function getCurrentTimeInSeconds(): number {
+  const now = new Date();
+  const today_begin = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+  const ms = now.getTime() - today_begin.getTime();
+  const sec = Math.floor(ms / 1000);
+  return sec;
+}

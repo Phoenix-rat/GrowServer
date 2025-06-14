@@ -2,34 +2,27 @@ import { PeerData } from "./peer";
 import { WorldData } from "./world";
 import { Collection } from "../utils/Collection";
 import { CooldownOptions } from "./commands";
+import { ItemsDatMeta } from "growtopia.js";
+import { ItemsInfo } from "./item-pages";
 
 export interface CDNContent {
   version: string;
   uri: string;
+  itemsDatName: string;
 }
+
+export interface ItemsData {
+  hash:     string,
+  content:  Buffer,
+  metadata:  ItemsDatMeta,
+  wiki:     ItemsInfo[]
+}
+
 
 export interface Cache {
   peers: Collection<number, PeerData>;
   worlds: Collection<string, WorldData>;
   cooldown: Collection<string, CooldownOptions>;
-}
-
-export interface ItemsInfo {
-  id: number;
-  name: string;
-  desc: string;
-  recipe?: Recipe;
-  func?: ItemInfoFunc;
-  chi?: "earth" | "wind" | "fire" | "water";
-}
-
-export interface ItemInfoFunc {
-  add: string;
-  rem: string;
-}
-
-export interface Recipe {
-  splice: number[];
 }
 
 export interface MipMap {

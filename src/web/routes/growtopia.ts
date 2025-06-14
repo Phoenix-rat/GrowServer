@@ -33,7 +33,7 @@ export class GrowtopiaRoute {
         this.conf.web.ports[
           Math.floor(Math.random() * this.conf.web.ports.length)
         ];
-      str += `port|${randPort}\nloginurl|${this.conf.web.loginUrl}\ntype|1\n${this.conf.web.maintenance.enable ? "maint" : "#maint"}|${
+      str += `port|${randPort}\nloginurl|${this.conf.web.loginUrl}\ntype|1\ntype2|1\n${this.conf.web.maintenance.enable ? "maint" : "#maint"}|${
         this.conf.web.maintenance.message
       }\nmeta|ignoremeta\nRTENDMARKERBS1001`;
 
@@ -48,12 +48,6 @@ export class GrowtopiaRoute {
           root: rootPath
         });
     this.app.use("/cache/*", staticMiddleware);
-
-    this.app.get("/cache/*", (ctx) => {
-      const route = ctx.req.url.split("/growtopia/cache/")[1];
-      const url = `https://ubistatic-a.akamaihd.net/${this.base.cdn.uri}/cache/${route}`;
-      return ctx.redirect(url);
-    });
 
     return this.app;
   }
